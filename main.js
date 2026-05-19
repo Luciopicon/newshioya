@@ -76,3 +76,123 @@ const server = http.createServer(
       proxyReq.on(
         "error",
         (err) => {
+          console.error(
+            "[PROXY ERROR]",
+            err
+          );
+
+          if (!res.headersSent) {
+            res.writeHead(502);
+          }
+
+          res.end(
+            "Bad Gateway"
+          );
+        }
+      );
+
+      // websocket upgrade passthrough
+      if (
+        req.headers.upgrade &&
+        req.headers.upgrade.toLowerCase() ===
+          "websocket"
+      ) {
+        req.pipe(proxyReq);
+        return;
+      }
+
+      pipeline(
+        req,
+        proxyReq,
+        () => {}
+      );
+    } catch (err) {
+      console.error(err);
+
+      res.writeHead(500);
+
+      res.end(
+        "Internal Server Error"
+      );
+    }
+  }
+);
+
+// websocket support
+server.on(
+  "upgrade",
+  (
+    req,
+    socket,
+    head
+  ) => {
+    try {
+      const target =
+        new URL(TARGET);
+
+      const wsReq =
+        (
+          target.protocol ===
+          "https:"
+            ? https
+            : http
+        ).request({
+          hostname:
+            target.hostname,
+          port:
+            target.port ||
+            (
+              target.protocol ===
+              "https:"
+            )
+              ? 443
+              : 80,
+          path: req.url,
+          headers: req.headers,
+        });
+
+      wsReq.on(
+        "upgrade",
+        (
+          res,
+          wsSocket
+        ) => {
+          socket.write(
+            "HTTP/1.1 101 Switching Protocols\r\n" +
+              Object.entries(
+                res.headers
+              )
+                .map(
+                  ([k, v]) =>
+                    `${k}: ${v}`
+                )
+                .join("\r\n") +
+              "\r\n\r\n"
+          );
+
+          wsSocket.pipe(socket);
+          socket.pipe(wsSocket);
+        }
+      );
+
+      wsReq.end();
+    } catch (err) {
+      console.error(
+        "[WS ERROR]",
+        err
+      );
+
+      socket.destroy();
+    }
+  }
+);
+
+server.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+    console.log(
+      `[INFO] Proxy online on port ${PORT}`
+    );
+  }
+);
