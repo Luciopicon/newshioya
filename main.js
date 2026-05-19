@@ -1,198 +1,46 @@
 import http from "http";
-import https from "https";
-import { pipeline } from "stream";
+import { WebSocketServer } from "ws";
+import net from "net";
 
-const TARGET =
-  process.env.TARGET_DOMAIN ||
-  "https://newshioya.fun";
+const PORT = process.env.PORT || 8080;
 
-const PORT =
-  process.env.PORT || 8080;
+const SSH_HOST = "185.194.204.52";
+const SSH_PORT = 22;
 
-const server = http.createServer(
-  async (req, res) => {
-    try {
-      const targetUrl =
-        new URL(req.url, TARGET);
+const server = http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end("WebSocket Proxy Online");
+});
 
-      // clone headers
-      const headers = {
-        ...req.headers,
-      };
+const wss = new WebSocketServer({ server });
 
-      // spoof headers
-      headers["host"] =
-        new URL(TARGET).host;
+wss.on("connection", (ws) => {
+  const socket = net.connect(SSH_PORT, SSH_HOST);
 
-      headers["origin"] =
-        "https://www.google.com";
-
-      headers["referer"] =
-        "https://www.google.com/";
-
-      headers["x-forwarded-proto"] =
-        "https";
-
-      headers["x-real-ip"] =
-        req.socket.remoteAddress ||
-        "1.1.1.1";
-
-      headers["user-agent"] =
-        headers["user-agent"] ||
-        "Mozilla/5.0";
-
-      // remove problematic headers
-      delete headers["content-length"];
-      delete headers["x-vercel-id"];
-      delete headers["x-forwarded-host"];
-      delete headers["connection"];
-
-      const client =
-        targetUrl.protocol === "https:"
-          ? https
-          : http;
-
-      const proxyReq =
-        client.request(
-          targetUrl,
-          {
-            method: req.method,
-            headers,
-          },
-          (proxyRes) => {
-            res.writeHead(
-              proxyRes.statusCode,
-              proxyRes.headers
-            );
-
-            pipeline(
-              proxyRes,
-              res,
-              () => {}
-            );
-          }
-        );
-
-      proxyReq.on(
-        "error",
-        (err) => {
-          console.error(
-            "[PROXY ERROR]",
-            err
-          );
-
-          if (!res.headersSent) {
-            res.writeHead(502);
-          }
-
-          res.end(
-            "Bad Gateway"
-          );
-        }
-      );
-
-      // websocket upgrade passthrough
-      if (
-        req.headers.upgrade &&
-        req.headers.upgrade.toLowerCase() ===
-          "websocket"
-      ) {
-        req.pipe(proxyReq);
-        return;
-      }
-
-      pipeline(
-        req,
-        proxyReq,
-        () => {}
-      );
-    } catch (err) {
-      console.error(err);
-
-      res.writeHead(500);
-
-      res.end(
-        "Internal Server Error"
-      );
+  socket.on("data", (data) => {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(data);
     }
-  }
-);
+  });
 
-// websocket support
-server.on(
-  "upgrade",
-  (
-    req,
-    socket,
-    head
-  ) => {
-    try {
-      const target =
-        new URL(TARGET);
+  ws.on("message", (msg) => {
+    socket.write(msg);
+  });
 
-      const wsReq =
-        (
-          target.protocol ===
-          "https:"
-            ? https
-            : http
-        ).request({
-          hostname:
-            target.hostname,
-          port:
-            target.port ||
-            (
-              target.protocol ===
-              "https:"
-            )
-              ? 443
-              : 80,
-          path: req.url,
-          headers: req.headers,
-        });
+  socket.on("close", () => {
+    ws.close();
+  });
 
-      wsReq.on(
-        "upgrade",
-        (
-          res,
-          wsSocket
-        ) => {
-          socket.write(
-            "HTTP/1.1 101 Switching Protocols\r\n" +
-              Object.entries(
-                res.headers
-              )
-                .map(
-                  ([k, v]) =>
-                    `${k}: ${v}`
-                )
-                .join("\r\n") +
-              "\r\n\r\n"
-          );
+  ws.on("close", () => {
+    socket.destroy();
+  });
 
-          wsSocket.pipe(socket);
-          socket.pipe(wsSocket);
-        }
-      );
+  socket.on("error", (err) => {
+    console.log("Socket Error:", err.message);
+    ws.close();
+  });
+});
 
-      wsReq.end();
-    } catch (err) {
-      console.error(
-        "[WS ERROR]",
-        err
-      );
-
-      socket.destroy();
-    }
-  }
-);
-
-server.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-    console.log(
-      `[INFO] Proxy online on port ${PORT}`
-    );
-  }
-);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`WS Proxy rodando na porta ${PORT}`);
+});
