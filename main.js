@@ -1,70 +1,92 @@
 import http from "http";
-import { WebSocketServer } from "ws";
+import https from "https";
 import net from "net";
+import tls from "tls";
+import { URL } from "url";
 
 const PORT = process.env.PORT || 8080;
+const TARGET = process.env.TARGET_DOMAIN;
 
-const SSH_HOST = "185.194.204.52";
-const SSH_PORT = 22;
+if (!TARGET) {
+  console.log("TARGET_DOMAIN não definida");
+  process.exit(1);
+}
+
+const target = new URL(TARGET);
 
 const server = http.createServer((req, res) => {
-  res.writeHead(200, {
-    "Content-Type": "text/plain"
-  });
+  const options = {
+    hostname: target.hostname,
+    port: target.port || (target.protocol === "https:" ? 443 : 80),
+    path: req.url,
+    method: req.method,
+    headers: {
+      ...req.headers,
+      host: target.hostname,
+    },
+    rejectUnauthorized: false,
+  };
 
-  res.end("WebSocket SSH Proxy Online");
+  const proxy = (target.protocol === "https:" ? https : http).request(
+    options,
+    (prs) => {
+      res.writeHead(prs.statusCode, prs.headers);
+      prs.pipe(res);
+    }
+  );
+
+  req.pipe(proxy);
+
+  proxy.on("error", (err) => {
+    console.log("HTTP ERROR:", err.message);
+    res.writeHead(500);
+    res.end("proxy error");
+  });
 });
 
-const wss = new WebSocketServer({
-  server,
-  perMessageDeflate: false
-});
+server.on("upgrade", (req, socket, head) => {
+  console.log("WebSocket upgrade recebido");
 
-wss.on("connection", (ws, req) => {
-  console.log("[WS] Cliente conectado");
+  const upstream =
+    target.protocol === "https:"
+      ? tls.connect(
+          target.port || 443,
+          target.hostname,
+          { rejectUnauthorized: false },
+          () => {
+            upstream.write(buildRequest(req));
+            if (head?.length) upstream.write(head);
 
-  ws.on("error", (err) => {
-    console.log("[WS ERROR]", err.message);
-  });
+            socket.pipe(upstream);
+            upstream.pipe(socket);
+          }
+        )
+      : net.connect(target.port || 80, target.hostname, () => {
+          upstream.write(buildRequest(req));
+          if (head?.length) upstream.write(head);
 
-  const socket = net.connect(SSH_PORT, SSH_HOST, () => {
-    console.log("[SSH] Conectado ao servidor SSH");
-  });
+          socket.pipe(upstream);
+          upstream.pipe(socket);
+        });
 
-  socket.on("data", (data) => {
-    try {
-      if (ws.readyState === ws.OPEN) {
-        ws.send(data);
-      }
-    } catch (e) {
-      console.log("[SEND ERROR]", e.message);
-    }
-  });
-
-  ws.on("message", (msg) => {
-    try {
-      socket.write(msg);
-    } catch (e) {
-      console.log("[WRITE ERROR]", e.message);
-    }
-  });
-
-  socket.on("close", () => {
-    console.log("[SSH] Conexão fechada");
-    ws.close();
-  });
-
-  ws.on("close", () => {
-    console.log("[WS] Cliente desconectado");
+  upstream.on("error", (err) => {
+    console.log("WS ERROR:", err.message);
     socket.destroy();
   });
-
-  socket.on("error", (err) => {
-    console.log("[SSH ERROR]", err.message);
-    ws.close();
-  });
 });
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`WS Proxy rodando na porta ${PORT}`);
+function buildRequest(req) {
+  let headers = `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`;
+
+  for (const [k, v] of Object.entries(req.headers)) {
+    headers += `${k}: ${v}\r\n`;
+  }
+
+  headers += "\r\n";
+
+  return headers;
+}
+
+server.listen(PORT, () => {
+  console.log(`Proxy online porta ${PORT}`);
 });
